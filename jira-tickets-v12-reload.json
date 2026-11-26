@@ -1,0 +1,155 @@
+{
+  "name": "Jira tickets by mapped company (v12 - reload)",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT\n  TRIM(company_name) AS company_name,\n  TRIM(CAST(company_id AS TEXT)) AS company_id\nFROM uk_clientco_test.jira_company_mapping\nWHERE company_id IS NOT NULL\n  AND company_name IS NOT NULL AND TRIM(company_name) <> ''\nORDER BY 1;",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Get companies",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build JQL values in the exact format nFeed stores: \"Acme Trading Co (62990) [62990]\"\nconst BATCH_SIZE = 40;   // 246 companies -> 7 batches; a bad company value only fails its own batch\nconst PROJECTS   = ['Alpha', 'Beta'];  // project NAMES as shown in Jira\nconst FIELD      = 'cf[15922]';               // same field as \"Company\" in JQL\n\n// JQL string literals use double quotes; escape backslashes and quotes inside values\nconst escapeJql = (s) => String(s).replace(/\\\\/g, '\\\\\\\\').replace(/\"/g, '\\\\\"');\n\nconst toJiraValue = (name, id) => {\n  // If the DB name already ends with \"(62990)\", don't add it twice\n  const base = name.replace(new RegExp(`\\\\s*\\\\(${id}\\\\)\\\\s*$`), '');\n  return `${base} (${id}) [${id}]`;\n};\n\n// one entry per company_id\nconst byId = new Map();\nfor (const { json: r } of $input.all()) {\n  const id = String(r.company_id ?? '').trim();\n  const name = String(r.company_name ?? '').trim();\n  if (id && name && !byId.has(id)) byId.set(id, toJiraValue(name, id));\n}\nconst values = [...byId.values()];\n\nconst projectClause = PROJECTS.map(p => `\"${p}\"`).join(', ');\nconst batches = [];\nfor (let i = 0; i < values.length; i += BATCH_SIZE) {\n  const chunk = values.slice(i, i + BATCH_SIZE);\n  const list = chunk.map(v => `\"${escapeJql(v)}\"`).join(', ');\n  batches.push({ json: {\n    batch: batches.length + 1,\n    companyCount: chunk.length,\n    jql: `project in (${projectClause}) AND ${FIELD} in (${list}) ORDER BY key ASC`\n  }});\n}\nreturn batches;"
+      },
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Build JQL batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jiraVersion": "serverPat",
+        "resource": "issue",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "jql": "={{ $json.jql }}",
+          "fields": "summary,issuetype,project,customfield_15922"
+        }
+      },
+      "id": "a1b2c3d4-0014-4000-8000-000000000014",
+      "name": "Fetch JIRA Tickets",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        660,
+        300
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: the Jira node's output (one item per ticket).\n// Turns everything Jira returned into ONE SQL statement that saves results in Postgres.\n// Always returns exactly one item, so the save step always runs, even with 0 tickets or Jira errors.\nconst TABLE = 'uk_clientco_test.jira_ticket_results';\nconst RUN_AT = $now.toISO();\n\nconst COMPANY_IDS = new Set(\n  $('Get companies').all()\n    .map(i => String(i.json.company_id ?? '').trim().replace(/\\.0+$/, ''))\n    .filter(Boolean)\n);\nconst PROJECTS = ['alpha', 'beta'];\n\nconst companyValues = (v) => {\n  if (v === null || v === undefined) return [];\n  return (Array.isArray(v) ? v : [v])\n    .map(c => (c && typeof c === 'object') ? (c.value ?? c.name ?? c.id ?? JSON.stringify(c)) : c)\n    .filter(c => c !== null && c !== undefined && c !== '')\n    .map(c => String(c).trim());\n};\n\nconst rows = [];\nconst seen = new Set();\nlet items = 0, errors = 0;\n\n// The Jira node outputs ONE ITEM PER TICKET (it already did the paging for us)\nfor (const item of $input.all()) {\n  const t = item.json;\n\n  // Error from a batch (needs Settings -> On Error -> Continue on the Jira node)\n  if (t.error) {\n    errors++;\n    rows.push({ issue_key: 'JIRA_ERROR', reason: JSON.stringify(t.error).slice(0, 2000) });\n    continue;\n  }\n  if (!t.key) continue;           // empty item from \"Always Output Data\" when nothing matched\n  items++;\n  if (seen.has(t.key)) continue;  // same ticket can match two batches\n  seen.add(t.key);\n\n  const f = t.fields || {};\n  const project = f.project?.name ?? '';\n  const companies = companyValues(f.customfield_15922);\n  const ids = companies.flatMap(c => c.match(/\\d+/g) || []);\n\n  let reason = '';\n  if (!PROJECTS.includes(project.toLowerCase())) reason = `project \"${project}\" not in Alpha/Beta`;\n  else if (companies.length === 0) reason = 'Company field is empty';\n  else if (!ids.some(id => COMPANY_IDS.has(id))) reason = 'company id not in jira_company_mapping';\n\n  rows.push({\n    issue_key: t.key,\n    project,\n    issuetype: f.issuetype?.name ?? '',\n    summary: f.summary ?? '',\n    company: companies.join(', '),\n    in_scope: reason === '' ? 'yes' : 'no',\n    reason\n  });\n}\n\n// One summary row per run: what was sent and what came back\nconst jql = $('Build JQL batches').all().map(i => i.json.jql);\nrows.unshift({\n  issue_key: 'RUN_SUMMARY',\n  summary: `companies=${COMPANY_IDS.size} batches=${jql.length} tickets_returned=${items} unique_tickets=${seen.size} batch_errors=${errors}`,\n  reason: (jql[0] || '').slice(0, 2000)\n});\n\nfor (const r of rows) r.run_at = RUN_AT;\n\n// Dollar-quoting ($j$ ... $j$) means quotes/apostrophes in summaries can never break the SQL\nconst json = JSON.stringify(rows).split('$j$').join('$ j$');\n\nconst sql = `\nCREATE TABLE IF NOT EXISTS ${TABLE} (\n  run_at     timestamptz,\n  issue_key  text,\n  project    text,\n  issuetype  text,\n  summary    text,\n  company    text,\n  in_scope   text,\n  reason     text\n);\n-- Replace the previous results with this run's results in ONE statement:\n-- the DELETE and INSERT succeed or fail together, so the table is never left empty\nWITH cleared AS (\n  DELETE FROM ${TABLE}\n)\nINSERT INTO ${TABLE} (run_at, issue_key, project, issuetype, summary, company, in_scope, reason)\nSELECT run_at::timestamptz, issue_key, project, issuetype, summary, company, in_scope, reason\nFROM json_to_recordset($j$${json}$j$::json)\n  AS x(run_at text, issue_key text, project text, issuetype text, summary text, company text, in_scope text, reason text);\n`;\n\nreturn [{ json: { sql, rows_saved: rows.length, run_at: RUN_AT } }];\n"
+      },
+      "id": "a1b2c3d4-0012-4000-8000-000000000012",
+      "name": "Prepare results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "a1b2c3d4-0013-4000-8000-000000000013",
+      "name": "Save to Postgres",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [
+        1100,
+        300
+      ]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Get companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get companies": {
+      "main": [
+        [
+          {
+            "node": "Build JQL batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build JQL batches": {
+      "main": [
+        [
+          {
+            "node": "Fetch JIRA Tickets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch JIRA Tickets": {
+      "main": [
+        [
+          {
+            "node": "Prepare results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare results": {
+      "main": [
+        [
+          {
+            "node": "Save to Postgres",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

@@ -1,0 +1,348 @@
+{
+  "name": "TAXO Completion Notifier",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ⚙️ TAXO Completion Notifier: setup\n\n1. **Get Requests** + **Update Status** → re-select the `taxo_requests` Data Table\n2. **Search Closed Tickets** → confirm Jira credential (JQL uses project TAXO)\n3. **Verify Brands** → confirm Postgres credential\n4. **Send Email** → create/select an SMTP credential and set the From address\n5. **Evaluate** → edit the settings block at the top: ADMIN_EMAIL, JIRA_BASE_URL. For testing, set TEST_EMAIL_OVERRIDE to your own address.\n6. Test with **Execute workflow**, then **Activate**\n\nStatus flow in taxo_requests:\n`open` → `closed_pending` → `done` (requester emailed) or `escalated` (you emailed after 24h)",
+        "height": 460,
+        "width": 480
+      },
+      "id": "4891bd24-c261-4103-bbf1-c32f137da621",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        -140
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      },
+      "id": "b670ab55-5ed2-4dca-a650-a1249ef989aa",
+      "name": "Every 30 min",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "taxo_requests (re-select me)"
+        },
+        "filters": {
+          "conditions": []
+        },
+        "returnAll": true
+      },
+      "id": "9e21abd6-445d-451b-abda-ff7a12535cf2",
+      "name": "Get Requests",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keep only requests that still need checking. Everything else (done, escalated, old rows without a status) is ignored.\nconst OPEN_STATUSES = ['open', 'closed_pending'];\n\nconst pending = $input.all()\n  .map(i => i.json)\n  .filter(r => r && r.issue_key && OPEN_STATUSES.includes(String(r.status || '').toLowerCase()));\n\n// Nothing to check -> return no items, so the rest of the workflow does not run (no Jira call, no query).\nif (pending.length === 0) return [];\n\nreturn [{ json: { pending, pendingCount: pending.length } }];\n"
+      },
+      "id": "4b552d58-526d-4744-a772-f078eb730ec9",
+      "name": "Pick Pending",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jiraVersion": "serverPat",
+        "operation": "getAll",
+        "returnAll": true,
+        "options": {
+          "jql": "project = TAXO AND reporter = currentUser() AND status = Closed AND updated >= -30d"
+        }
+      },
+      "id": "a491f901-920c-4fcc-928b-a8a0ca4ec5e9",
+      "name": "Search Closed Tickets",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        660,
+        0
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Match our pending requests against the closed Jira tickets, and build ONE verification payload for all of them.\nconst pending = $('Pick Pending').first().json.pending;\n\n// Jira returns one item per closed ticket. With \"Always Output Data\" on, \"no results\" arrives as one empty item.\nconst closed = new Map();\nfor (const i of $input.all()) {\n  if (i.json && i.json.key) closed.set(i.json.key, i.json);\n}\n\n// Jira Server dates look like \"2026-09-28T10:00:00.000+0530\"; add the colon so every JS engine parses them.\nconst toIso = s => {\n  if (!s) return null;\n  const d = new Date(String(s).replace(/([+-]\\d{2})(\\d{2})$/, '$1:$2'));\n  return isNaN(d) ? null : d.toISOString();\n};\n\nconst tickets = [];\nconst checks = [];          // one row per (ticket, mk_file_id, brand) -> sent to Postgres\nconst mkFileIds = new Set();\n\nfor (const r of pending) {\n  const issue = closed.get(r.issue_key);\n  if (!issue) continue;     // ticket not closed yet -> check again next run\n\n  let companies = [];\n  try { companies = JSON.parse(r.details_json || '[]'); } catch (e) { companies = []; }\n  if (!Array.isArray(companies)) companies = [];\n\n  let invalid = companies.length === 0;   // no details stored -> cannot verify automatically\n  for (const c of companies) {\n    const mk = String(c.mkFileId ?? '').trim();\n    // Only digits allowed: this list is written straight into the SQL text (see Verify Brands), so it must be safe.\n    if (!/^\\d+$/.test(mk)) { invalid = true; continue; }\n    mkFileIds.add(mk);\n    for (const b of (Array.isArray(c.brands) ? c.brands : [])) {\n      const brand = typeof b === 'object' && b ? b.brand : b;\n      const epsilon = (typeof b === 'object' && b && b.epsilonBrand) || String(brand || '').toLowerCase();\n      if (!brand) continue;\n      checks.push({ issue_key: r.issue_key, mk_file_id: mk, brand: String(brand), epsilon_brand: String(epsilon) });\n    }\n  }\n\n  tickets.push({\n    rowId: r.id,\n    issueKey: r.issue_key,\n    status: String(r.status || '').toLowerCase(),\n    requesterEmail: r.requester_email,\n    requestType: r.request_type || 'new',\n    summary: (issue.fields && issue.fields.summary) || r.issue_key,\n    companies,\n    // The 1-day clock starts at Jira's resolution date; if Jira has none, at the moment we first saw it closed.\n    closedAt: r.closed_at ? toIso(r.closed_at) : (toIso(issue.fields && issue.fields.resolutiondate) || new Date().toISOString()),\n    expectedChecks: checks.filter(c => c.issue_key === r.issue_key).length,\n    invalid\n  });\n}\n\nif (tickets.length === 0) return [];\n\nreturn [{\n  json: {\n    tickets,\n    // Base64 has no commas or quotes, so n8n passes it to Postgres as ONE parameter, untouched.\n    payloadB64: Buffer.from(JSON.stringify(checks), 'utf8').toString('base64'),\n    mkFileList: [...mkFileIds].join(', ') || '0'\n  }\n}];\n"
+      },
+      "id": "228ed1b9-72f8-4c62-bff7-f698d828b5e5",
+      "name": "Match Closed",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=WITH req AS (\n  -- $1 = base64 JSON array of { issue_key, mk_file_id, brand, epsilon_brand }\n  SELECT r.issue_key, r.mk_file_id, r.brand, r.epsilon_brand\n  FROM jsonb_to_recordset(convert_from(decode($1, 'base64'), 'UTF8')::jsonb)\n       AS r(issue_key text, mk_file_id text, brand text, epsilon_brand text)\n),\nfound AS (\n  SELECT DISTINCT d.mk_file_id::text AS mk_file_id, lower(trim(d.term_value_attr)) AS term\n  FROM whse.dim_mp_product_detail d\n  WHERE d.mk_file_id IN ({{ $json.mkFileList }})\n    AND lower(trim(d.term_value_attr)) IN (SELECT lower(trim(epsilon_brand)) FROM req)\n)\nSELECT req.issue_key, req.mk_file_id, req.brand, req.epsilon_brand,\n       EXISTS (\n         SELECT 1 FROM found f\n         WHERE f.mk_file_id = req.mk_file_id\n           AND f.term = lower(trim(req.epsilon_brand))\n       ) AS populated\nFROM req;\n",
+        "options": {
+          "queryReplacement": "={{ $json.payloadB64 }}"
+        }
+      },
+      "id": "0cb55ed1-7a5a-4265-8bb3-b8e6c744bcb7",
+      "name": "Verify Brands",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1100,
+        0
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide what happens to each closed ticket: notify the requester, escalate to you, or wait for the next run.\n\n// ---------- Settings: edit these ----------\nconst WAIT_HOURS = 24;                                    // how long after closing we wait for the data\nconst ADMIN_EMAIL = 'your.name@yourcompany.com';              // receives the \"still not populated\" alerts\nconst JIRA_BASE_URL = 'https://jira.yourcompany.com';     // used for the ticket link in emails\nconst TEST_EMAIL_OVERRIDE = '';                           // while testing, put your own address here: ALL emails go to it\n// -------------------------------------------\n\nconst { tickets } = $('Match Closed').first().json;\n\n// Verification rows from Postgres, grouped by ticket. (\"Always Output Data\" can add one empty item.)\nconst byKey = new Map();\nfor (const i of $input.all()) {\n  const r = i.json;\n  if (!r || !r.issue_key) continue;\n  if (!byKey.has(r.issue_key)) byKey.set(r.issue_key, []);\n  byKey.get(r.issue_key).push(r);\n}\n\nconst esc = s => String(s ?? '').replace(/[&<>\"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\nconst isTrue = v => v === true || v === 't' || v === 'true';\nconst now = Date.now();\nconst out = [];\n\nfor (const t of tickets) {\n  const rows = byKey.get(t.issueKey) || [];\n  const missing = rows.filter(r => !isTrue(r.populated));\n  const allPopulated = !t.invalid && t.expectedChecks > 0 && rows.length === t.expectedChecks && missing.length === 0;\n  const hoursSinceClosed = (now - Date.parse(t.closedAt)) / 36e5;\n  const link = `${JIRA_BASE_URL.replace(/\\/+$/, '')}/browse/${encodeURIComponent(t.issueKey)}`;\n  const kind = t.requestType === 'rerun' ? 'Re-run taxo' : 'Taxo';\n\n  const table = rows.length ? `\n    <table cellpadding=\"6\" cellspacing=\"0\" border=\"1\" style=\"border-collapse:collapse;border-color:#d6dae1;font-size:14px\">\n      <tr style=\"background:#f0f2f5\"><th align=\"left\">mk_file_id</th><th align=\"left\">brand_attr</th><th align=\"left\">Epsilon Brand</th><th align=\"left\">Status</th></tr>\n      ${rows.map(r => `<tr><td>${esc(r.mk_file_id)}</td><td>${esc(r.brand)}</td><td>${esc(r.epsilon_brand)}</td><td>${isTrue(r.populated) ? '✅ Populated' : '⏳ Not found yet'}</td></tr>`).join('')}\n    </table>` : '<p><em>No brand details were stored for this request, so it could not be verified automatically.</em></p>';\n\n  const base = { rowId: t.rowId, issueKey: t.issueKey, closedAt: t.closedAt };\n\n  if (allPopulated) {\n    out.push({ json: { ...base,\n      action: 'notify', newStatus: 'done', sendEmail: true,\n      emailTo: TEST_EMAIL_OVERRIDE || t.requesterEmail,\n      subject: `${t.issueKey} completed: ${t.summary}`,\n      html: `<div style=\"font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1d2330\">\n        <p>Hi,</p>\n        <p>Your ${esc(kind)} request <a href=\"${esc(link)}\">${esc(t.issueKey)}</a> has been completed, and we have verified that the Epsilon Brand values are now populated:</p>\n        ${table}\n        <p>Thanks,<br>TAXO Request automation</p></div>`\n    } });\n  } else if (hoursSinceClosed >= WAIT_HOURS) {\n    out.push({ json: { ...base,\n      action: 'escalate', newStatus: 'escalated', sendEmail: true,\n      emailTo: TEST_EMAIL_OVERRIDE || ADMIN_EMAIL,\n      subject: `[Action needed] ${t.issueKey} closed but Epsilon Brand not populated`,\n      html: `<div style=\"font-family:Segoe UI,Arial,sans-serif;font-size:14px;color:#1d2330\">\n        <p><a href=\"${esc(link)}\">${esc(t.issueKey)}</a> (${esc(t.summary)}) was closed more than ${WAIT_HOURS} hours ago,\n        but ${t.invalid ? 'it could not be verified automatically' : `${missing.length} of ${rows.length} brand(s) are still not populated in whse.dim_mp_product_detail`}.</p>\n        ${table}\n        <p>Requester: ${esc(t.requesterEmail)}<br>The requester has <strong>not</strong> been emailed.\n        To re-check later, set this row's status back to <code>closed_pending</code> and clear closed_at in the taxo_requests table.</p></div>`\n    } });\n  } else if (t.status === 'open') {\n    // First time we see it closed: record that, no email yet.\n    out.push({ json: { ...base, action: 'wait', newStatus: 'closed_pending', sendEmail: false } });\n  }\n  // Already closed_pending and still inside the wait window -> nothing to update this run.\n}\n\nreturn out;\n"
+      },
+      "id": "5bc9a09c-a0ee-47c9-8a68-0ddc2aca175c",
+      "name": "Evaluate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1320,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "25e4ae6b-eae4-42af-b58d-2f2e38688a9e",
+              "leftValue": "={{ $json.sendEmail === true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ebdfb239-2e10-4b40-b07f-06871e63f217",
+      "name": "Needs Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "taxo-requests@yourcompany.com",
+        "toEmail": "={{ $json.emailTo }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "5a46340f-51c0-4ef3-8901-e2b238b5786e",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1760,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "dataTableId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "taxo_requests (re-select me)"
+        },
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $('Evaluate').item.json.rowId }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "status": "={{ $('Evaluate').item.json.newStatus }}",
+            "closed_at": "={{ $('Evaluate').item.json.closedAt }}",
+            "notified": "={{ $('Evaluate').item.json.newStatus === 'done' }}"
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "18d7c086-7f6b-49bf-abd9-ea93c0908803",
+      "name": "Update Status",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        1980,
+        0
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 30 min": {
+      "main": [
+        [
+          {
+            "node": "Get Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Requests": {
+      "main": [
+        [
+          {
+            "node": "Pick Pending",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick Pending": {
+      "main": [
+        [
+          {
+            "node": "Search Closed Tickets",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Closed Tickets": {
+      "main": [
+        [
+          {
+            "node": "Match Closed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Match Closed": {
+      "main": [
+        [
+          {
+            "node": "Verify Brands",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify Brands": {
+      "main": [
+        [
+          {
+            "node": "Evaluate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate": {
+      "main": [
+        [
+          {
+            "node": "Needs Email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Needs Email?": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Email": {
+      "main": [
+        [
+          {
+            "node": "Update Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}

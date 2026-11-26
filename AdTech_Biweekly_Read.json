@@ -1,0 +1,469 @@
+{
+  "name": "AdTech / Data / Identity - Biweekly Read (client-integration focus)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "daysInterval": 14,
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "ccf47273-77ad-45e7-a88a-f56b2f81839b",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -160,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// SOURCE 1: RSS. RSS is just a transport, so \"more feeds\" = more URLs here.\nconst feeds = [\n  \"https://www.adexchanger.com/feed/\",\n  \"https://digiday.com/feed/\",\n  \"https://adtechdaily.com/feed\",\n  \"https://clearcode.cc/feed/\",\n  \"https://www.exchangewire.com/feed/\",\n  \"https://martech.org/feed/\",\n  // Google News topic searches (free, no key); when:14d scopes at the source.\n  // Queries mirror the team's actual domain: DSP/DMP, identity, clean rooms, consent.\n  \"https://news.google.com/rss/search?q=(%22demand-side%20platform%22%20OR%20DSP%20OR%20DMP)%20advertising%20when:14d&hl=en-US&gl=US&ceid=US:en\",\n  \"https://news.google.com/rss/search?q=(%22identity%20resolution%22%20OR%20%22identity%20graph%22%20OR%20UID2%20OR%20ID5%20OR%20LiveRamp)%20when:14d&hl=en-US&gl=US&ceid=US:en\",\n  \"https://news.google.com/rss/search?q=(%22data%20clean%20room%22%20OR%20%22customer%20data%20platform%22%20OR%20%22data%20collaboration%22)%20advertising%20when:14d&hl=en-US&gl=US&ceid=US:en\",\n  \"https://news.google.com/rss/search?q=(GDPR%20OR%20consent%20OR%20%22privacy%20sandbox%22%20OR%20cookieless)%20advertising%20when:14d&hl=en-US&gl=US&ceid=US:en\",\n  \"https://news.google.com/rss/search?q=AI%20(adtech%20OR%20%22programmatic%20advertising%22)%20when:14d&hl=en-US&gl=US&ceid=US:en\"\n];\nreturn feeds.map(url => ({ json: { feedUrl: url } }));"
+      },
+      "id": "9e1be669-19f3-4e12-95ab-fe4a11cf2b29",
+      "name": "Feed List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        80,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.feedUrl }}",
+        "options": {}
+      },
+      "id": "0028d4d6-97a5-451d-9fc8-b64b56ac4d6d",
+      "name": "Read RSS Feeds",
+      "type": "n8n-nodes-base.rssFeedRead",
+      "typeVersion": 1.1,
+      "position": [
+        320,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Map RSS items into the common candidate shape every source uses.\nconst out = [];\nfor (const it of $input.all()) {\n  const d = it.json || {};\n  const title = (d.title || \"\").trim();\n  const link  = (d.link || d.guid || \"\").trim();\n  if (!title || !link) continue;\n  let domain = \"\"; try { domain = new URL(link).hostname.replace(/^www\\./, \"\"); } catch (e) {}\n  const snippet = (d.contentSnippet || d.content || d.summary || \"\")\n    .replace(/<[^>]*>/g, \" \").replace(/\\s+/g, \" \").trim().slice(0, 300);\n  out.push({ json: {\n    title, link, domain,\n    date: d.isoDate || d.pubDate || \"\",\n    snippet, source: \"rss:\" + domain, score: 0, comments: 0\n  }});\n}\nreturn out;"
+      },
+      "id": "28a63e61-7456-4ee0-babe-9a16452cf12a",
+      "name": "Normalize RSS",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "simple": false,
+        "filters": {
+          "q": "label:AdTech newer_than:14d"
+        },
+        "options": {}
+      },
+      "id": "deccc852-aba2-4957-9206-25b7bce10290",
+      "name": "Get Newsletters",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        320,
+        224
+      ],
+      "webhookId": "080fd397-c968-414a-b21e-b6fa15fc2cec",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// SOURCE 2: Gmail label (LinkedIn + ad-tech newsletters).\n// The \"read\" you care about is usually a link inside the email\n// (e.g. a linkedin.com/pulse article), so we extract the first\n// non-tracking URL from the body. Skip emails with no usable link.\nconst out = [];\nfor (const it of $input.all()) {\n  const d = it.json || {};\n  const title = (d.subject || d.Subject || (d.headers && d.headers.subject) || d.snippet || \"\").toString().trim();\n  if (!title) continue;\n\n  const body = (d.text || d.textPlain || d.html || d.snippet || \"\").toString();\n  const plain = body.replace(/<[^>]*>/g, \" \");\n\n  let link = \"\";\n  const urls = plain.match(/https?:\\/\\/[^\\s\"'<>]+/g) || [];\n  for (const u of urls) {\n    if (/unsubscribe|list-manage|mailchi|sendgrid|beehiiv\\.com.*(unsub|manage)|preferences|view.*browser|tracking|cdn-cgi|\\.gif|\\.png/i.test(u)) continue;\n    link = u; break;\n  }\n  if (!link) continue; // no real article link -> not a \"read\", skip\n\n  let domain = \"\"; try { domain = new URL(link).hostname.replace(/^www\\./, \"\"); } catch (e) { domain = \"newsletter\"; }\n  const snippet = plain.replace(/\\s+/g, \" \").trim().slice(0, 300);\n\n  out.push({ json: {\n    title, link, domain,\n    date: d.date || d.internalDate || \"\",\n    snippet, source: \"newsletter\", score: 0, comments: 0\n  }});\n}\nreturn out;"
+      },
+      "id": "9d08984f-3786-4852-9f9e-b5946e09c9c7",
+      "name": "Normalize Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        224
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://www.reddit.com/r/adops+programmatic/top.json?t=week&limit=25",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "n8n-adtech-digest/1.0"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b945a51e-1539-4965-82d9-115a50c301b3",
+      "name": "Get Reddit",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        320,
+        448
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// SOURCE 3a: Reddit. Defensive: a rate-limit/error response won't have\n// data.children, so we guard and just emit nothing in that case.\nconst out = [];\nconst resp = $input.first() ? $input.first().json : {};\nconst children = (resp && resp.data && resp.data.children) || [];\nfor (const c of children) {\n  const p = c.data || {};\n  const title = (p.title || \"\").trim();\n  if (!title) continue;\n  const link = (!p.is_self && p.url) ? p.url : (\"https://www.reddit.com\" + p.permalink);\n  let domain = \"\"; try { domain = new URL(link).hostname.replace(/^www\\./, \"\"); } catch (e) {}\n  out.push({ json: {\n    title, link, domain,\n    date: new Date((p.created_utc || 0) * 1000).toISOString(),\n    snippet: (p.selftext || \"\").slice(0, 300),\n    source: \"reddit:r/\" + p.subreddit,\n    score: p.score || 0, comments: p.num_comments || 0   // <-- real buzz signal\n  }});\n}\nreturn out;"
+      },
+      "id": "13a26389-a24b-41fd-9996-9561fc17f596",
+      "name": "Normalize Reddit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        448
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://hn.algolia.com/api/v1/search_by_date?tags=story&query=adtech&numericFilters=created_at_i>{{ Math.floor(Date.now()/1000) - 1209600 }}&hitsPerPage=25",
+        "options": {}
+      },
+      "id": "3325378d-fc74-4dd2-963d-cc5fbcc1ea01",
+      "name": "Get Hacker News",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        320,
+        672
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// SOURCE 3b: Hacker News (Algolia API). points/num_comments = real buzz.\nconst out = [];\nconst hits = ($input.first() ? $input.first().json.hits : []) || [];\nfor (const h of hits) {\n  const title = (h.title || \"\").trim();\n  if (!title) continue;\n  const link = h.url || (\"https://news.ycombinator.com/item?id=\" + h.objectID);\n  let domain = \"\"; try { domain = new URL(link).hostname.replace(/^www\\./, \"\"); } catch (e) {}\n  out.push({ json: {\n    title, link, domain,\n    date: new Date((h.created_at_i || 0) * 1000).toISOString(),\n    snippet: (h.story_text || \"\").replace(/<[^>]*>/g, \" \").slice(0, 300),\n    source: \"hackernews\",\n    score: h.points || 0, comments: h.num_comments || 0\n  }});\n}\nreturn out;"
+      },
+      "id": "edbe800c-cd2b-4e1a-ad40-f99ff37e2e11",
+      "name": "Normalize HN",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        560,
+        672
+      ]
+    },
+    {
+      "parameters": {
+        "numberInputs": 4
+      },
+      "id": "d9c51f04-88a6-492b-a50d-72e7022c2a27",
+      "name": "Merge Sources",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        832,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Fan-in: items from ALL sources arrive here via the Merge node.\n// De-dupe, keep recent, drop junk, PRE-SCORE relevance, build one prompt.\nconst items = $input.all();\nconst now = Date.now();\nconst cutoff = now - 14 * 24 * 60 * 60 * 1000;\n\nconst EXCLUDE = /\\b(appoint|appointment|names?\\s+(new\\s+)?(ceo|cfo|coo|cmo|cro|chief)|hires?|promoted|joins\\s+as|earnings|q[1-4]\\s+(results|earnings)|quarterly\\s+results|obituary)\\b/i;\n\n// STAGE 1 of relevance: cheap deterministic keyword boost. This does NOT\n// decide what gets picked - it decides ordering + what fits in the prompt\n// (token budget), so the LLM spends attention on likely-relevant items.\nconst BOOST = [\n  [/\\b(dsp|demand[- ]side platform|dmp|data management platform)\\b/i, 3],\n  [/\\b(identity (resolution|graph)|id5|uid2|unified id|rampid|liveramp|epsilon|match rate|onboarding|addressab|signal loss)\\b/i, 3],\n  [/\\b(clean room|customer data platform|cdp\\b|data collaboration)\\b/i, 3],\n  [/\\b(gdpr|consent|cmp\\b|tcf\\b|privacy sandbox|cookieless|third[- ]party cookie|eprivacy|edpb|noyb|dpa fine|ico fine)\\b/i, 3],\n  [/\\b(server[- ]side|s2s\\b|conversions? api|capi\\b|api integration|webhook|sdk|tag(ging)? manag|pixel)\\b/i, 2],\n  [/\\b(iab\\b|tech lab|prebid|openrtb|seller[- ]defined|ads\\.txt)\\b/i, 2],\n  [/\\b(retail media|commerce media|curation|supply path|ctv\\b)\\b/i, 2],\n  [/\\b(ai|genai|llm|agentic|machine learning)\\b/i, 1],\n  [/\\b(measurement|attribution|incrementality)\\b/i, 1]\n];\n\nconst seen = new Set();\nlet candidates = [];\nfor (const it of items) {\n  const d = it.json || {};\n  const title = (d.title || \"\").trim();\n  const link  = (d.link || \"\").trim();\n  if (!title || !link) continue;\n\n  const ts = d.date ? new Date(d.date).getTime() : now;\n  if (!isNaN(ts) && ts < cutoff) continue;\n\n  const key = title.toLowerCase().replace(/[^a-z0-9]+/g, \" \").trim().slice(0, 80);\n  if (seen.has(key)) continue;\n  seen.add(key);\n\n  if (EXCLUDE.test(title)) continue;\n\n  const hay = title + \" \" + (d.snippet || \"\");\n  let rel = 0;\n  for (const [re, w] of BOOST) if (re.test(hay)) rel += w;\n\n  candidates.push({\n    title, link,\n    domain: d.domain || \"\", date: d.date || \"\", snippet: d.snippet || \"\",\n    source: d.source || \"\", score: d.score || 0, comments: d.comments || 0,\n    relevanceHint: rel\n  });\n}\n\n// Order by pre-score then recency; cap at 120 to keep the prompt affordable.\ncandidates.sort((a, b) => (b.relevanceHint - a.relevanceHint) || (new Date(b.date || 0) - new Date(a.date || 0)));\ncandidates = candidates.slice(0, 120);\ncandidates.forEach((c, i) => { c.id = i + 1; });\n\nconst FREE = [\"adexchanger.com\",\"clearcode.cc\",\"adtechdaily.com\",\"exchangewire.com\",\"martech.org\",\"thedrum.com\",\"marketingdive.com\"];\n\nconst lines = candidates.map(c => {\n  const eng = (c.score || c.comments) ? ` [${c.source} up${c.score}/${c.comments}c]` : ` [${c.source}]`;\n  return `#${c.id} | ${c.domain}${FREE.includes(c.domain) ? \" (free)\" : \"\"}${eng} | ${c.title}${c.snippet ? \" - \" + c.snippet : \"\"}`;\n}).join(\"\\n\");\n\n// STAGE 2 of relevance: LLM rubric with an explicit PERSONA. The model can\n// only optimize for the reader you describe - so describe them precisely.\nconst promptText =\n`You are curating a biweekly digest for CLIENT INTEGRATION ENGINEERS at a data- and identity-driven marketing company. Their daily work: integrating client data with DSPs and DMPs, identity resolution and onboarding (identity graphs, match rates), audience activation, server-side and API integrations, and GDPR/consent compliance in EU digital media.\n\nFrom the CANDIDATES below, pick the stories DIRECTLY useful to this team. Aim for 6-8 picks, but NEVER pad with general adtech news: if only 4 truly qualify, return 4.\n\nSTRONGLY PREFER:\n- Privacy & GDPR: rulings, DPA fines, consent/CMP and TCF changes, Privacy Sandbox, cookie deprecation, ePrivacy - anything that changes how data may be collected, shared, or activated.\n- Identity: identity graphs and resolution, UID2/ID5/RampID, onboarding, match rates, addressability, signal loss.\n- Data infrastructure: clean rooms, CDPs, data collaboration, conversions APIs, server-side tagging.\n- DSP/DMP platform changes: new or deprecated APIs, integration features, audience/targeting capabilities - especially deprecations that force integration work.\n- AI in adtech where it changes workflows: AI audience building, agentic media buying, automation of integration or measurement tasks.\n- Standards: IAB Tech Lab specs, OpenRTB, Prebid, seller-defined audiences.\n\nREJECT: agency account wins, brand campaign creativity, executive moves, earnings, generic \"state of advertising\" opinion pieces, consumer gadget news.\n\nFor each pick:\n- \"summary\": 2-3 sentences (40-60 words) describing the news factually, based ONLY on the title and snippet provided. Do not invent details that are not in the candidate line.\n- \"why_it_matters\": 1-2 sentences (20-35 words) on the concrete implication for client integration, data, or identity work at a company like ours.\n- \"relevance\": 1-10 for THIS team (10 = changes how we integrate or activate data tomorrow). Only include items with relevance >= 6.\n\nBracket tags show the source; \"upN/Mc\" means N upvotes and M comments - treat as real engagement signals. Prefer free-to-read sources when stories duplicate.\n\nReturn ONLY a JSON array (no prose, no markdown fences). Each element:\n{\"id\": <number>, \"category\": \"<privacy_gdpr|identity|data_infrastructure|platforms|ai_adtech|standards>\", \"relevance\": <1-10>, \"paywall_risk\": \"<low|medium|high>\", \"summary\": \"<text>\", \"why_it_matters\": \"<text>\"}\n\nCANDIDATES:\n${lines}`;\n\nreturn [{ json: { candidates, count: candidates.length, promptText } }];"
+      },
+      "id": "7536ede5-0df6-449a-94a2-f9ee71f9f912",
+      "name": "Prepare Candidates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1040,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// The Basic LLM Chain returns its result as text (resp.text / resp.output).\nconst resp = $input.first().json;\nlet text = \"\";\nif (typeof resp.text === \"string\") text = resp.text;\nelse if (typeof resp.output === \"string\") text = resp.output;\nelse if (typeof resp.response === \"string\") text = resp.response;\nelse if (Array.isArray(resp.content)) text = resp.content.filter(b => b.type === \"text\").map(b => b.text).join(\"\\n\");\nelse if (typeof resp === \"string\") text = resp;\n\nlet picks = [];\ntry {\n  const match = text.match(/\\[[\\s\\S]*\\]/);   // first JSON array in the text\n  picks = JSON.parse(match ? match[0] : text);\n} catch (e) {\n  throw new Error(\"Could not parse model JSON. Raw text:\\n\" + text);\n}\n\nconst candidates = $(\"Prepare Candidates\").first().json.candidates;\nconst byId = new Map(candidates.map(c => [Number(c.id), c]));\n\nconst enriched = picks\n  .map(p => {\n    const c = byId.get(Number(p.id));\n    if (!c) return null;   // model hallucinated an id -> drop, never invent a link\n    return { ...c,\n      category: p.category, relevance: p.relevance,\n      paywall_risk: p.paywall_risk,\n      summary: p.summary || \"\", why_it_matters: p.why_it_matters || \"\" };\n  })\n  .filter(Boolean)\n  .filter(p => (p.relevance || 0) >= 6)      // enforce the bar in code too\n  .sort((a, b) => (b.relevance || 0) - (a.relevance || 0))\n  .slice(0, 8);\n\nreturn enriched.map(json => ({ json }));"
+      },
+      "id": "fee5e11e-9656-4ac7-8ea9-0d9131b41904",
+      "name": "Parse & Rank",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1568,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const picks = $input.all().map(i => i.json);\nconst today = new Date().toLocaleDateString(\"en-GB\", { day:\"numeric\", month:\"long\", year:\"numeric\" });\nconst CAT = { privacy_gdpr:\"Privacy & GDPR\", identity:\"Identity\", data_infrastructure:\"Data Infrastructure\", platforms:\"DSP / DMP Platforms\", ai_adtech:\"AI in AdTech\", standards:\"Standards\" };\n\nconst esc = s => String(s || \"\").replace(/&/g,\"&amp;\").replace(/</g,\"&lt;\").replace(/>/g,\"&gt;\");\n\nconst rows = picks.map((p, i) => {\n  const url = (p.link || \"\").trim();\n  const eng = (p.score || p.comments) ? ` &middot; ${p.score} upvotes` : \"\";\n  const titleHtml = url\n    ? `<a href=\"${url}\" style=\"font-size:17px;font-weight:600;color:#1d4ed8;text-decoration:none;\">${i+1}. ${esc(p.title)}</a>`\n    : `<span style=\"font-size:17px;font-weight:600;color:#111827;\">${i+1}. ${esc(p.title)}</span>`;\n  const readHtml = url\n    ? `<div style=\"margin-top:8px;\"><a href=\"${url}\" style=\"font-size:13px;color:#1d4ed8;text-decoration:underline;\">Read the article &rarr;</a></div>`\n    : `<div style=\"margin-top:8px;font-size:12px;color:#ef4444;\">(no link found for this item)</div>`;\n  return `\n  <tr><td style=\"padding:18px 0;border-bottom:1px solid #eee;\">\n    <div style=\"font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:#6b7280;\">\n      ${CAT[p.category] || esc(p.category)} &middot; relevance ${p.relevance}/10${eng}${p.paywall_risk === \"high\" ? \" &middot; may be paywalled\" : \"\"}\n    </div>\n    ${titleHtml}\n    <div style=\"font-size:14px;color:#374151;line-height:1.5;margin-top:6px;\">${esc(p.summary)}</div>\n    <div style=\"font-size:13px;color:#065f46;line-height:1.5;margin-top:6px;\"><strong>Why it matters for us:</strong> ${esc(p.why_it_matters)}</div>\n    <div style=\"font-size:12px;color:#9ca3af;margin-top:4px;\">${esc(p.source || p.domain)}</div>\n    ${readHtml}\n  </td></tr>`;\n}).join(\"\");\n\nconst html = `<!doctype html><html><body style=\"margin:0;background:#f6f7f9;\">\n  <table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f6f7f9;padding:24px 0;\">\n    <tr><td align=\"center\">\n      <table width=\"600\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#fff;border-radius:12px;padding:32px;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;\">\n        <tr><td>\n          <div style=\"font-size:13px;color:#6b7280;\">AdTech / Data / Identity &middot; ${today}</div>\n          <h1 style=\"font-size:22px;margin:4px 0 4px;color:#111;\">The Biweekly Read</h1>\n          <div style=\"font-size:13px;color:#6b7280;margin-bottom:12px;\">Curated for client integration: DSP/DMP, identity &amp; privacy.</div>\n        </td></tr>\n        ${rows}\n        <tr><td style=\"padding-top:20px;font-size:12px;color:#9ca3af;\">Curated from trade press, newsletters, Reddit &amp; Hacker News. Reply to suggest sources.</td></tr>\n      </table>\n    </td></tr>\n  </table>\n</body></html>`;\n\nreturn [{ json: { subject: `The Biweekly Read - ${today} (${picks.length} stories)`, html } }];"
+      },
+      "id": "875d92e9-5491-4067-973e-3cd3a9840a30",
+      "name": "Build Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1712,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "you@example.com",
+        "toEmail": "your.name@yourcompany.com",
+        "subject": "={{ $json.subject }}",
+        "html": "={{ $json.html }}",
+        "options": {}
+      },
+      "id": "d535ea64-8504-486d-9c96-3b81b7563121",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1920,
+        336
+      ],
+      "webhookId": "94ae5363-b13f-48e2-b59a-161524182f99"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.promptText }}"
+      },
+      "id": "417536a6-1ad0-4cc5-acef-ad9dea1cc5e7",
+      "name": "Classify (LLM Chain)",
+      "type": "@n8n/n8n-nodes-langchain.chainLlm",
+      "typeVersion": 1.5,
+      "position": [
+        1264,
+        336
+      ]
+    },
+    {
+      "parameters": {
+        "options": {
+          "maxTokensToSample": 4000
+        }
+      },
+      "id": "254aeca0-667f-48c8-a97e-637197adf7c5",
+      "name": "Bedrock Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAwsBedrock",
+      "typeVersion": 1,
+      "position": [
+        1232,
+        544
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Feed List",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Reddit",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Hacker News",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Newsletters",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Feed List": {
+      "main": [
+        [
+          {
+            "node": "Read RSS Feeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read RSS Feeds": {
+      "main": [
+        [
+          {
+            "node": "Normalize RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize RSS": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Newsletters": {
+      "main": [
+        [
+          {
+            "node": "Normalize Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Email": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Get Reddit": {
+      "main": [
+        [
+          {
+            "node": "Normalize Reddit",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize Reddit": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "Get Hacker News": {
+      "main": [
+        [
+          {
+            "node": "Normalize HN",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize HN": {
+      "main": [
+        [
+          {
+            "node": "Merge Sources",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "Merge Sources": {
+      "main": [
+        [
+          {
+            "node": "Prepare Candidates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Candidates": {
+      "main": [
+        [
+          {
+            "node": "Classify (LLM Chain)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Rank": {
+      "main": [
+        [
+          {
+            "node": "Build Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Email": {
+      "main": [
+        [
+          {
+            "node": "Send Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bedrock Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Classify (LLM Chain)",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify (LLM Chain)": {
+      "main": [
+        [
+          {
+            "node": "Parse & Rank",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "55a13c9b-ce7b-472b-8793-4ad97b3413c6",
+  "meta": {
+    "instanceId": "a232119f3221083d53e6be8a74c6f4c0ec58fca82e64a9eb0a27ae58047e7207"
+  },
+  "nodeGroups": [],
+  "id": "6VYbbpRwgTjEL45z",
+  "tags": []
+}

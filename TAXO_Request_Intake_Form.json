@@ -1,0 +1,539 @@
+{
+  "name": "TAXO Request - Intake Form (New + Re-run)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## ⚙️ After importing, configure these:\n\n1. **Get Companies** → re-select your `companies` Data Table\n2. **Get Brands** → confirm Postgres credential\n3. **Create Issue** → pick project **TAXO** + issue type\n4. **Save Request** → re-select your `taxo_requests` Data Table\n5. All 3 webhooks → confirm/select your Basic Auth credential\n6. **Activate** the workflow, then open the **Production** URL of *Webhook (GET) – Form Page*\n\n⚠️ Test URLs (/webhook-test/) only catch ONE call per test run, so the brand lookup fails in test mode. Use production URLs.\n\nPaths: `taxo-request` (page), `taxo-brands` (brand API), `taxo-request-submit` (POST)\n\n🧪 **Dry run:** open `.../webhook/taxo-request?dryRun=1`, which shows a preview and creates nothing.\n\n🏷️ **Create Issue → Additional Fields → Components:** pick *Partner-Funded/Retail Media Network - Brand ID/Add* (component IDs can't be imported).",
+        "height": 520,
+        "width": 480
+      },
+      "id": "e6a85dbf-dc84-4e8a-a538-b2937bd23b99",
+      "name": "Setup Notes",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### ① Serve the form page",
+        "height": 220,
+        "width": 940,
+        "color": 7
+      },
+      "id": "4fef4800-d027-4b59-bbc0-b6b9fe7b3d72",
+      "name": "Note Page",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### ② Brand lookup API (called by the page via fetch)",
+        "height": 220,
+        "width": 940,
+        "color": 7
+      },
+      "id": "5911f2be-38e4-4989-bcfc-754220173b0e",
+      "name": "Note Brands",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### ③ Handle submission  (add ?dryRun=1 to the page URL to skip Jira + Data Table)",
+        "height": 480,
+        "width": 1400,
+        "color": 7
+      },
+      "id": "d7ba2f9e-f149-4944-8ff9-2d4879bb569f",
+      "name": "Note Submit",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        0,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "path": "taxo-request",
+        "authentication": "basicAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "5212cd65-1d62-437a-83d0-583141ed8979",
+      "name": "Webhook (GET) - Form Page",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        60,
+        -20
+      ],
+      "webhookId": "1aaee4fc-c476-4d6e-83a0-2d686b102ffd"
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "dataTableId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list",
+          "cachedResultName": "companies (re-select me)"
+        },
+        "filters": {
+          "conditions": []
+        },
+        "returnAll": true
+      },
+      "id": "60b79861-63d5-4a22-ba62-025537afe84e",
+      "name": "Get Companies",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        280,
+        -20
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the TAXO request page: email + one or more companies, each with its own brand list.\n\n// Optional: if you switched the Brands API webhook to Header Auth, paste the same key here.\n// Leave it empty ('') if the Brands API uses Basic Auth.\nconst TAXO_KEY = '';\n\nconst companies = $input.all()\n  .map(i => i.json)\n  .filter(c => c && c.company_name && c.company_id && c.mk_file_id)\n  .map(c => ({ name: String(c.company_name), id: String(c.company_id), mk: String(c.mk_file_id) }))\n  .sort((a, b) => a.name.localeCompare(b.name));\n\n// \"<\" is escaped so no company name can break out of the <script> tag\nconst data = JSON.stringify(companies).replace(/</g, '\\\\u003c');\nconst key = JSON.stringify(TAXO_KEY).replace(/</g, '\\\\u003c');\n\nconst html = `<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>TAXO Request</title>\n<style>\n  :root { --bg:#f5f6f8; --card:#fff; --sub:#f9fafb; --text:#1d2330; --muted:#5d6675; --border:#d6dae1; --accent:#2a5bd7; --err:#b3261e; }\n  @media (prefers-color-scheme: dark) {\n    :root { --bg:#14171c; --card:#1d2129; --sub:#232833; --text:#e8eaee; --muted:#9aa3b2; --border:#343a46; --accent:#7ea2ff; --err:#ff8a80; }\n  }\n  * { box-sizing: border-box; }\n  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif; }\n  .card { max-width:680px; margin:40px auto; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:28px; }\n  h1 { margin:0 0 4px; font-size:22px; }\n  p.sub { margin:0 0 24px; color:var(--muted); }\n  label.f { display:block; font-weight:600; margin:18px 0 6px; }\n  .hint { color:var(--muted); font-size:13px; font-weight:400; }\n  input[type=email], select, input[type=search] { width:100%; padding:9px 10px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--text); font:inherit; }\n  .company-card { border:1px solid var(--border); background:var(--sub); border-radius:8px; padding:12px 14px; margin-top:12px; }\n  .card-head { display:flex; align-items:baseline; gap:8px; margin-bottom:8px; }\n  .card-head strong { flex:0 1 auto; }\n  .card-head .ids { color:var(--muted); font-size:13px; flex:1; }\n  button.remove { border:1px solid var(--border); background:var(--card); color:var(--text); border-radius:6px; padding:2px 10px; font:inherit; cursor:pointer; }\n  .brand-list { max-height:240px; overflow:auto; border:1px solid var(--border); background:var(--card); border-radius:6px; padding:6px 10px; margin-top:8px; }\n  .brand-list:empty { display:none; }\n  label.brand { display:block; padding:3px 0; cursor:pointer; }\n  .status { color:var(--muted); font-size:13px; margin-top:6px; }\n  .sel-wrap { margin-top:10px; }\n  .sel-head { font-size:13px; font-weight:600; color:var(--muted); margin-bottom:4px; }\n  .sel-row { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) auto; gap:8px; align-items:center; padding:3px 0; }\n  .sel-brand { overflow-wrap:anywhere; }\n  .sel-arrow { color:var(--muted); }\n  .sel-row input { width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:6px; background:var(--card); color:var(--text); font:inherit; }\n  .sel-row input.bad { border-color:var(--err); }\n  button.sel-remove { border:0; background:none; color:var(--muted); font-size:18px; line-height:1; cursor:pointer; padding:2px 6px; }\n  fieldset.rtype { border:0; padding:0; margin:0; }\n  legend.f { font-weight:600; margin:18px 0 6px; padding:0; }\n  label.radio { display:block; padding:3px 0; cursor:pointer; }\n  #total { margin-top:18px; font-weight:600; }\n  #form-error { color:var(--err); margin-top:10px; }\n  #form-error:empty { display:none; }\n  #submit-btn { margin-top:16px; width:100%; padding:11px; border:0; border-radius:6px; background:var(--accent); color:#fff; font:inherit; font-weight:600; cursor:pointer; }\n  #submit-btn:disabled { opacity:.6; cursor:wait; }\n</style>\n</head>\n<body>\n<div class=\"card\">\n  <h1>TAXO Request</h1>\n  <p class=\"sub\">Request a taxonomy update. You'll be emailed when the ticket is completed.</p>\n  <div id=\"dry-banner\" hidden style=\"margin:0 0 16px;padding:10px 12px;border-radius:6px;background:#fff4d6;color:#6b4e00;border:1px solid #f0d58a;font-weight:600\">🧪 DRY RUN MODE: no Jira ticket or log row will be created.</div>\n\n  <form id=\"taxo-form\" method=\"POST\" action=\"taxo-request-submit\">\n    <label class=\"f\" for=\"email\">Requester Email</label>\n    <input id=\"email\" name=\"requesterEmail\" type=\"email\" placeholder=\"you@company.com\" required>\n\n    <fieldset class=\"rtype\">\n      <legend class=\"f\">Request type</legend>\n      <label class=\"radio\"><input type=\"radio\" name=\"requestType\" value=\"new\" required> New taxo <span class=\"hint\">(brand not set up yet)</span></label>\n      <label class=\"radio\"><input type=\"radio\" name=\"requestType\" value=\"rerun\"> Re-run taxo <span class=\"hint\">(new products added under an existing brand)</span></label>\n    </fieldset>\n\n    <label class=\"f\" for=\"company-picker\">Companies <span class=\"hint\">(add one or more, tick brands, then confirm each Epsilon Brand)</span></label>\n    <select id=\"company-picker\">\n      <option value=\"\">Add a company…</option>\n    </select>\n    <div id=\"company-cards\"></div>\n\n    <div id=\"total\">No companies added yet.</div>\n    <div id=\"form-error\" role=\"alert\"></div>\n\n    <input type=\"hidden\" name=\"selectionsJson\">\n    <button id=\"submit-btn\" type=\"submit\">Submit request</button>\n  </form>\n</div>\n\n<script>\n(function () {\n  var COMPANIES = ${data};\n  var TAXO_KEY = ${key};\n  var form = document.getElementById('taxo-form');\n  var picker = document.getElementById('company-picker');\n  var cardsEl = document.getElementById('company-cards');\n  var totalEl = document.getElementById('total');\n  var errEl = document.getElementById('form-error');\n  var btn = document.getElementById('submit-btn');\n  var cards = {};   // keyed 'c' + index, so insertion order is kept\n\n  // Dry-run mode: .../taxo-request?dryRun=1\n  var DRY = new URLSearchParams(location.search).get('dryRun') === '1';\n  if (DRY) {\n    form.action = 'taxo-request-submit?dryRun=1';\n    document.getElementById('dry-banner').hidden = false;\n  }\n\n  COMPANIES.forEach(function (c, i) {\n    var o = document.createElement('option');\n    o.value = String(i);\n    o.textContent = c.name + '  (ID ' + c.id + ' · MK ' + c.mk + ')';\n    picker.appendChild(o);\n  });\n\n  function el(tag, cls, text) {\n    var e = document.createElement(tag);\n    if (cls) e.className = cls;\n    if (text != null) e.textContent = text;   // textContent: never interpreted as HTML\n    return e;\n  }\n\n  function checkedIn(state) { return Array.from(state.rows.keys()); }\n\n  // Each ticked brand gets a row: AMAZON -> [amazon] (editable). A Map keeps tick order and is safe for any brand text.\n  function addRow(state, brand, cb) {\n    if (state.rows.has(brand)) return;\n    var row = el('div', 'sel-row');\n    var input = el('input');\n    input.type = 'text';\n    input.maxLength = 100;\n    input.value = state.epsilon.has(brand) ? state.epsilon.get(brand) : brand.toLowerCase();\n    input.setAttribute('aria-label', 'Epsilon Brand for ' + brand);\n    input.addEventListener('input', function () {\n      state.epsilon.set(brand, input.value);\n      input.classList.toggle('bad', !input.value.trim());\n    });\n    var x = el('button', 'sel-remove', '\\u00d7');\n    x.type = 'button';\n    x.setAttribute('aria-label', 'Unselect ' + brand);\n    x.addEventListener('click', function () { cb.checked = false; removeRow(state, brand); refresh(state); });\n    row.appendChild(el('span', 'sel-brand', brand));\n    row.appendChild(el('span', 'sel-arrow', '\\u2192'));\n    row.appendChild(input);\n    row.appendChild(x);\n    state.selList.appendChild(row);\n    state.rows.set(brand, { row: row, input: input });\n    state.selWrap.hidden = false;\n  }\n\n  function removeRow(state, brand) {\n    var r = state.rows.get(brand);\n    if (!r) return;\n    state.epsilon.set(brand, r.input.value);     // remember the edit if the brand is ticked again\n    r.row.parentNode.removeChild(r.row);\n    state.rows.delete(brand);\n    state.selWrap.hidden = state.rows.size === 0;\n  }\n\n  function refresh(state) {\n    state.statusEl.textContent = state.rows.size + ' of ' + state.total + ' selected';\n    updateTotals();\n  }\n\n  function updateTotals() {\n    var keys = Object.keys(cards), nBrands = 0;\n    keys.forEach(function (k) { nBrands += checkedIn(cards[k]).length; });\n    totalEl.textContent = keys.length\n      ? nBrands + ' brand(s) selected across ' + keys.length + ' company(ies)'\n      : 'No companies added yet.';\n  }\n\n  picker.addEventListener('change', function () {\n    var idx = picker.value;\n    picker.value = '';                               // reset so the next company can be added\n    if (idx === '' || cards['c' + idx]) return;\n    picker.options[Number(idx) + 1].disabled = true; // +1 skips the placeholder option\n    addCompany(idx, COMPANIES[Number(idx)]);\n  });\n\n  function addCompany(idx, c) {\n    var k = 'c' + idx;\n    var card = el('div', 'company-card');\n    var head = el('div', 'card-head');\n    head.appendChild(el('strong', null, c.name));\n    head.appendChild(el('span', 'ids', 'ID ' + c.id + ' · MK ' + c.mk));\n    var rm = el('button', 'remove', 'Remove');\n    rm.type = 'button';\n    head.appendChild(rm);\n    var filter = el('input');\n    filter.type = 'search';\n    filter.placeholder = 'Filter brands…';\n    filter.disabled = true;\n    var listEl = el('div', 'brand-list');\n    var statusEl = el('div', 'status', 'Loading brands…');\n    card.appendChild(head);\n    card.appendChild(filter);\n    card.appendChild(listEl);\n    card.appendChild(statusEl);\n    var selWrap = el('div', 'sel-wrap');\n    selWrap.hidden = true;\n    selWrap.appendChild(el('div', 'sel-head', 'Selected brand_attr \\u2192 Epsilon Brand (edit if needed)'));\n    var selList = el('div');\n    selWrap.appendChild(selList);\n    card.appendChild(selWrap);\n    cardsEl.appendChild(card);\n\n    var state = { company: c, listEl: listEl, statusEl: statusEl, selWrap: selWrap, selList: selList,\n                  rows: new Map(), epsilon: new Map(), loaded: false, removed: false, total: 0 };\n    cards[k] = state;\n    updateTotals();\n\n    rm.addEventListener('click', function () {\n      state.removed = true;\n      card.parentNode.removeChild(card);\n      delete cards[k];\n      picker.options[Number(idx) + 1].disabled = false;\n      updateTotals();\n    });\n\n    filter.addEventListener('input', function () {\n      var q = filter.value.toLowerCase();\n      Array.prototype.forEach.call(listEl.children, function (l) {\n        l.style.display = l.textContent.toLowerCase().indexOf(q) > -1 ? '' : 'none';\n      });\n    });\n\n    listEl.addEventListener('change', function (ev) {\n      var cb = ev.target;\n      if (!cb || cb.type !== 'checkbox') return;\n      if (cb.checked) addRow(state, cb.value, cb); else removeRow(state, cb.value);\n      refresh(state);\n    });\n\n    var headers = { 'Accept': 'application/json' };\n    if (TAXO_KEY) headers['X-Taxo-Key'] = TAXO_KEY;\n    var url = 'taxo-brands?companyId=' + encodeURIComponent(c.id) + '&mkFileId=' + encodeURIComponent(c.mk);\n\n    fetch(url, { headers: headers })\n      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })\n      .then(function (d) {\n        if (state.removed) return;                   // company was removed while loading\n        var brands = (d && d.brands) || [];\n        if (!brands.length) { statusEl.textContent = 'No brands found for this company. Remove it to continue.'; return; }\n        brands.forEach(function (b) {\n          var label = el('label', 'brand');\n          var cb = el('input');\n          cb.type = 'checkbox';\n          cb.value = b;\n          label.appendChild(cb);\n          label.appendChild(document.createTextNode(' ' + b));\n          listEl.appendChild(label);\n        });\n        state.loaded = true;\n        state.total = brands.length;\n        filter.disabled = false;\n        statusEl.textContent = '0 of ' + brands.length + ' selected';\n      })\n      .catch(function (e) {\n        if (state.removed) return;\n        statusEl.textContent = 'Could not load brands (' + e.message + '). Remove and re-add this company to retry.';\n      });\n  }\n\n  form.addEventListener('submit', function (ev) {\n    errEl.textContent = '';\n    var keys = Object.keys(cards), selections = [], problems = [];\n    keys.forEach(function (k) {\n      var s = cards[k], picked = [];\n      s.rows.forEach(function (r, brand) {\n        var eb = r.input.value.trim();\n        if (!eb) { r.input.classList.add('bad'); problems.push(s.company.name + ': Epsilon Brand missing for \"' + brand + '\"'); }\n        picked.push({ brand: brand, epsilonBrand: eb });\n      });\n      if (!s.loaded) problems.push(s.company.name + ' (brands not loaded)');\n      else if (!picked.length) problems.push(s.company.name + ' (no brands ticked)');\n      else selections.push({ companyName: s.company.name, companyId: s.company.id, mkFileId: s.company.mk, brands: picked });\n    });\n    if (!keys.length) { ev.preventDefault(); errEl.textContent = 'Add at least one company.'; return; }\n    if (problems.length) {\n      ev.preventDefault();\n      errEl.textContent = 'Please fix: ' + problems.join('; ') + '. Tick brands or remove the company.';\n      return;\n    }\n    form.elements.namedItem('selectionsJson').value = JSON.stringify(selections);\n    btn.disabled = true;               // prevents a double-click creating two tickets\n    btn.textContent = 'Submitting…';\n  });\n\n  window.addEventListener('pageshow', function () { btn.disabled = false; btn.textContent = 'Submit request'; });\n})();\n</script>\n</body>\n</html>`;\n\nreturn [{ json: { html } }];\n"
+      },
+      "id": "9e70825a-31f1-4124-b31a-414d901a7f87",
+      "name": "Build Form HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        500,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      },
+      "id": "9515be23-91fa-401d-9482-3ff346a41af0",
+      "name": "Respond Form Page",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        -20
+      ]
+    },
+    {
+      "parameters": {
+        "path": "taxo-brands",
+        "authentication": "basicAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "c1fcb296-f9db-43b2-8cf6-b58bfea4f607",
+      "name": "Webhook (GET) - Brands API",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        60,
+        260
+      ],
+      "webhookId": "6e9fa0c8-37a9-4556-b266-600340a7bd85"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT brand_attr\nFROM whse.dim_mp_product\nWHERE company_id = $1\n  AND mk_file_id = $2\nORDER BY brand_attr;",
+        "options": {
+          "queryReplacement": "={{ $json.query.companyId }},{{ $json.query.mkFileId }}"
+        }
+      },
+      "id": "0c850ed6-70c1-4b30-9d6d-68ede22f8704",
+      "name": "Get Brands",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        280,
+        260
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ brands: $input.all().map(i => i.json.brand_attr).filter(b => b !== undefined && b !== null && String(b).trim() !== '') }) }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      },
+      "id": "d6d91c2a-d9ac-4a2e-b31c-e0fa6e1a61b7",
+      "name": "Respond Brands JSON",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        500,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "taxo-request-submit",
+        "authentication": "basicAuth",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "ebc9e582-634d-44d4-8a05-3dc254ecb016",
+      "name": "Webhook (POST) - Submit",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        60,
+        540
+      ],
+      "webhookId": "5b6a6f68-130b-4ed6-ad3d-32b28bb04203"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validate the submission and prepare everything downstream nodes need.\n// The page sends selectionsJson = [{ companyName, companyId, mkFileId, brands: [{ brand, epsilonBrand }, ...] }, ...]\nconst body = $json.body || {};\nconst MAX_COMPANIES = 25;\nconst JIRA_COMPONENT = 'Partner-Funded/Retail Media Network - Brand ID/Add';\n\nconst requesterEmail = String(body.requesterEmail || '').trim();\nif (!/^[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$/.test(requesterEmail)) {\n  throw new Error('Invalid requester email');\n}\n\n// New taxo or re-run. A page opened before this field existed sends nothing, so that falls back to 'new'.\nconst requestType = String(body.requestType || 'new').trim().toLowerCase();\nif (!['new', 'rerun'].includes(requestType)) throw new Error('Invalid request type');\nconst isRerun = requestType === 'rerun';\n\nlet raw = [];\ntry { raw = JSON.parse(body.selectionsJson || '[]'); } catch (e) { raw = []; }\nif (!Array.isArray(raw)) raw = [];\n\nconst clean = s => String(s ?? '').replace(/\\s+/g, ' ').trim();   // trim + collapse inner spaces\n\nconst seen = new Set();\nconst companies = [];\nfor (const s of raw) {\n  if (!s || typeof s !== 'object') continue;\n  const companyId = clean(s.companyId);\n  const mkFileId = clean(s.mkFileId);\n  const companyName = clean(s.companyName) || companyId;\n  if (!companyId || !mkFileId) throw new Error('A company selection is missing its ID or MK File ID');\n\n  const key = companyId + '|' + mkFileId;\n  if (seen.has(key)) continue;\n  seen.add(key);\n\n  const brands = [];\n  const seenBrand = new Set();\n  for (const b of (Array.isArray(s.brands) ? s.brands : [])) {\n    // accepts { brand, epsilonBrand } or a plain string (older page version)\n    const isObj = b && typeof b === 'object';\n    const brand = clean(isObj ? b.brand : b);\n    if (!brand || seenBrand.has(brand)) continue;\n    seenBrand.add(brand);\n    const epsilonBrand = clean(isObj ? b.epsilonBrand : '') || brand.toLowerCase();\n    if (epsilonBrand.length > 100) throw new Error(`Epsilon Brand too long for \"${brand}\" (max 100 characters)`);\n    brands.push({ brand, epsilonBrand });\n  }\n  if (brands.length === 0) throw new Error(`No brands selected for ${companyName}`);\n  companies.push({ companyName, companyId, mkFileId, brands });\n}\n\nif (companies.length === 0) throw new Error('No companies were selected');\nif (companies.length > MAX_COMPANIES) throw new Error(`Too many companies in one request (max ${MAX_COMPANIES})`);\n\n// ---------- Ticket text, following the TAXO team's template ----------\nconst brandWord = n => (n === 1 ? 'brand' : 'brands');\nconst shortList = (arr, n = 3) => (arr.length <= n ? arr.join(', ') : arr.slice(0, n).join(', ') + ` +${arr.length - n} more`);\nconst names = companies.map(c => c.companyName);\nconst allBrands = [...new Set(companies.flatMap(c => c.brands.map(b => b.brand)))];\nconst brandCount = companies.reduce((n, c) => n + c.brands.length, 0);\n\n// Everything that differs between \"new\" and \"re-run\" lives in this one object.\nconst T = isRerun\n  ? {\n      title: 'Re-run Taxo',\n      introOne: (list) => `There are some more new products added under the ${brandWord(list.length)} ${list.join(', ')}. So we would like to rerun taxo.`,\n      introMany: 'There are some more new products added under the following companies and brands. So we would like to rerun taxo.',\n      ask: 'Could you please re-run taxo and populate Epsilon Brand'\n    }\n  : {\n      title: 'Taxo',\n      introOne: (list, c) => `We are in the process of setting up new partner-funded campaigns for ${c.companyName} for the following ${brandWord(list.length)}: ${list.join(', ')}`,\n      introMany: 'We are in the process of setting up new partner-funded campaigns for the following companies and brands:',\n      ask: 'Could you please populate Epsilon Brand'\n    };\n\n// Summary: \"Acme Corp DE | Taxo for partner funded brand: AMAZON\"\n//          \"Acme Corp DE | Re-run Taxo for partner funded brand: LEGO\"   (Jira max 255 characters)\nlet jiraSummary = `${shortList(names)} | ${T.title} for partner funded ${brandWord(allBrands.length)}: ${shortList(allBrands)}`;\nif (jiraSummary.length > 250) jiraSummary = jiraSummary.slice(0, 247) + '...';\n\nconst idBlock = c => [c.companyName, `mk_file_id: ${c.mkFileId}`, `company_id: ${c.companyId}`];\nconst mapping = b => `\"${b.brand}\" → \"${b.epsilonBrand}\"`;\nconst askMany = `${T.ask} as below wherever we receive the brand_attr in the product file / as the Client Brand?`;\n\nconst parts = [];\nif (companies.length === 1) {\n  const c = companies[0];\n  const list = c.brands.map(b => b.brand);\n  parts.push(T.introOne(list, c));\n  parts.push(idBlock(c).join('\\n'));\n  if (c.brands.length === 1) {\n    const b = c.brands[0];\n    parts.push(`${T.ask} with \"${b.epsilonBrand}\" wherever we receive \"${b.brand}\" as the brand_attr in the product file / as the Client Brand?`);\n  } else {\n    parts.push(askMany + '\\n' + c.brands.map(b => `- ${mapping(b)}`).join('\\n'));\n  }\n} else {\n  parts.push(T.introMany);\n  for (const c of companies) {\n    parts.push([...idBlock(c), `${c.brands.length === 1 ? 'Brand' : 'Brands'}: ${c.brands.map(b => b.brand).join(', ')}`].join('\\n'));\n  }\n  parts.push(askMany + '\\n' + companies.map(c => `- ${c.companyName}: ${c.brands.map(mapping).join(', ')}`).join('\\n'));\n}\nconst jiraDescription = parts.join('\\n\\n');\n\n// Jira Server text fields hold ~32,767 characters; fail clearly instead of letting Jira reject it.\nif (jiraDescription.length > 30000) {\n  throw new Error('Too many brands for one Jira ticket (description over 30,000 characters). Split the request.');\n}\n\nreturn [{\n  json: {\n    requesterEmail,\n    requestType,                                   // 'new' or 'rerun'\n    requestTypeLabel: isRerun ? 'Re-run' : 'New',\n    companies,\n    companyCount: companies.length,\n    brandCount,\n    companyNames: names.join(', '),\n    companyIds: companies.map(c => c.companyId).join(', '),\n    mkFileIds: companies.map(c => c.mkFileId).join(', '),\n    // Data Table log line: \"Acme Corp DE (12345/67890): AMAZON→amazon, APPLE→apple | ...\"\n    logBrands: companies.map(c => `${c.companyName} (${c.companyId}/${c.mkFileId}): ${c.brands.map(b => `${b.brand}→${b.epsilonBrand}`).join(', ')}`).join(' | '),\n    jiraSummary,\n    jiraDescription,\n    jiraComponent: JIRA_COMPONENT\n  }\n}];\n"
+      },
+      "id": "4c89f112-c9c2-48f7-b41d-86dffc3bc5c3",
+      "name": "Parse Selection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        280,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "jiraVersion": "serverPat",
+        "project": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "TAXO (re-select me)"
+        },
+        "issueType": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "Task (re-select me)"
+        },
+        "summary": "={{ $('Parse Selection').first().json.jiraSummary }}",
+        "additionalFields": {
+          "description": "={{ $('Parse Selection').first().json.jiraDescription }}"
+        }
+      },
+      "id": "9bbc9546-c2f1-4c1d-bbac-3994bc010d6c",
+      "name": "Create Issue",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [
+        720,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "dataTableId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "",
+          "cachedResultName": "taxo_requests (re-select me)"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "issue_key": "={{ $json.key }}",
+            "requester_email": "={{ $('Parse Selection').first().json.requesterEmail }}",
+            "brands": "={{ $('Parse Selection').first().json.logBrands }}",
+            "notified": false
+          },
+          "matchingColumns": [],
+          "schema": []
+        },
+        "options": {}
+      },
+      "id": "313f7ca6-4761-4ca9-962e-56043be387fa",
+      "name": "Save Request",
+      "type": "n8n-nodes-base.dataTable",
+      "typeVersion": 1,
+      "position": [
+        940,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>Request submitted</title><style>body{margin:0;background:#f5f6f8;color:#1d2330;font:15px/1.5 system-ui,-apple-system,'Segoe UI',Roboto,sans-serif}@media (prefers-color-scheme:dark){body{background:#14171c;color:#e8eaee}.card{background:#1d2129!important;border-color:#343a46!important}}.card{max-width:620px;margin:40px auto;background:#fff;border:1px solid #d6dae1;border-radius:10px;padding:28px}a{color:#2a5bd7}</style></head><body><div class=\"card\"><h1>✅ Request submitted</h1><p>Ticket <strong>{{ $('Create Issue').first().json.key }}</strong> has been created covering <strong>{{ $('Parse Selection').first().json.brandCount }}</strong> brand(s) across <strong>{{ $('Parse Selection').first().json.companyCount }}</strong> company(ies).</p><p>You'll get an email at {{ $('Parse Selection').first().json.requesterEmail }} when it's done.</p><p><a href=\"taxo-request\">Submit another request</a></p></div></body></html>",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "id": "f8ed068d-02bc-4815-84c1-a5b79c35a3a7",
+      "name": "Confirmation Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1160,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "e38dad6a-49fb-4a70-bd77-1b327555044c",
+              "leftValue": "={{ $('Webhook (POST) - Submit').first().json.query?.dryRun === '1' }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "60971f8c-6835-4b14-b1df-d883360bd977",
+      "name": "Dry Run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        500,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Preview of exactly what WOULD be sent to Jira. Nothing is written anywhere.\n// Summary and description come from Parse Selection, the same source Create Issue uses.\nconst p = $('Parse Selection').first().json;\n\nconst esc = s => String(s ?? '').replace(/[&<>\"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '\"': '&quot;', \"'\": '&#39;' }[c]));\n\nconst html = `<!DOCTYPE html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>Dry run: TAXO Request</title>\n<style>\n  :root { --bg:#f5f6f8; --card:#fff; --text:#1d2330; --muted:#5d6675; --border:#d6dae1; --accent:#2a5bd7; --code:#f0f2f5; }\n  @media (prefers-color-scheme: dark) { :root { --bg:#14171c; --card:#1d2129; --text:#e8eaee; --muted:#9aa3b2; --border:#343a46; --accent:#7ea2ff; --code:#262b35; } }\n  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,\"Segoe UI\",Roboto,sans-serif; }\n  .card { max-width:760px; margin:40px auto; background:var(--card); border:1px solid var(--border); border-radius:10px; padding:28px; }\n  .banner { padding:10px 12px; border-radius:6px; background:#fff4d6; color:#6b4e00; border:1px solid #f0d58a; font-weight:600; }\n  h2 { font-size:14px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:22px 0 6px; }\n  pre { background:var(--code); border:1px solid var(--border); border-radius:6px; padding:12px; white-space:pre-wrap; word-break:break-word; margin:0; font-size:13px; }\n  a { color:var(--accent); }\n</style></head>\n<body><div class=\"card\">\n  <div class=\"banner\">🧪 DRY RUN: nothing was created in Jira or the taxo_requests table.</div>\n  <p>${p.brandCount} brand(s) across ${p.companyCount} company(ies) → <strong>1 Jira ticket</strong></p>\n\n  <h2>Jira fields</h2>\n  <pre>Request type: ${esc(p.requestTypeLabel || 'New')}\nComponent: ${esc(p.jiraComponent)}</pre>\n\n  <h2>Jira summary</h2>\n  <pre>${esc(p.jiraSummary)}</pre>\n\n  <h2>Jira description</h2>\n  <pre>${esc(p.jiraDescription)}</pre>\n\n  <h2>Would also log to taxo_requests</h2>\n  <pre>issue_key: (new ticket key)\nrequester_email: ${esc(p.requesterEmail)}\nbrands: ${esc(p.logBrands)}\nnotified: false</pre>\n\n  <p style=\"margin-top:22px\"><a href=\"taxo-request?dryRun=1\">Start another dry run</a></p>\n</div></body></html>`;\n\nreturn [{ json: { html } }];\n"
+      },
+      "id": "19baa323-f63f-4ad3-9fc1-e423a37096f0",
+      "name": "Build Dry Run Page",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        780
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              },
+              {
+                "name": "Cache-Control",
+                "value": "no-store"
+              }
+            ]
+          }
+        }
+      },
+      "id": "350fb5d9-abd7-4d29-b3e7-8525bbb5bf44",
+      "name": "Dry Run Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        940,
+        780
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Webhook (GET) - Form Page": {
+      "main": [
+        [
+          {
+            "node": "Get Companies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Companies": {
+      "main": [
+        [
+          {
+            "node": "Build Form HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Form HTML": {
+      "main": [
+        [
+          {
+            "node": "Respond Form Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook (GET) - Brands API": {
+      "main": [
+        [
+          {
+            "node": "Get Brands",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Brands": {
+      "main": [
+        [
+          {
+            "node": "Respond Brands JSON",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook (POST) - Submit": {
+      "main": [
+        [
+          {
+            "node": "Parse Selection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Selection": {
+      "main": [
+        [
+          {
+            "node": "Dry Run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Issue": {
+      "main": [
+        [
+          {
+            "node": "Save Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Request": {
+      "main": [
+        [
+          {
+            "node": "Confirmation Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry Run?": {
+      "main": [
+        [
+          {
+            "node": "Build Dry Run Page",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Issue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dry Run Page": {
+      "main": [
+        [
+          {
+            "node": "Dry Run Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "tags": []
+}
